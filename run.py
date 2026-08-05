@@ -1,0 +1,240 @@
+import argparse
+import json
+from pathlib import Path
+from datetime import datetime
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from src.config.sts_config import STSConfig, TestConfig
+from src.automation.nist_runner import NISTRunner
+from src.parser.result_parser import ResultParser
+from src.exporters import export_json, export_csv, export_latex, export_html
+from src.core.batch_reporter import BatchReporter
+
+
+def _auto_calculate(file_path: Path) -> tuple:
+    """Auto-calculate stream_length and number_of_streams."""
+    file_size = file_path.stat().st_size
+    with open(file_path, "rb") as f:
+        sample = f.read(1000)
+    text = sample.decode("ascii", errors="ignore")
+    valid = set("01 \n\r\t")
+    is_ascii = all(c in valid for c in text) and len(text) > 100
+    total_bits = file_size if is_ascii else file_size * 8
+    
+    # Conservative defaults
+    stream_length = 100000
+    number_of_streams = min(total_bits // stream_length, 10)
+    
+    if number_of_streams < 1:
+        stream_length = max(1000, total_bits)
+        number_of_streams = 1
+    
+    return stream_length, number_of_streams
+
+
+def _build_config_from_inline(sts_path: Path, run_cfg: dict) -> STSConfig:
+    """Build STSConfig from inline batch.json entry."""
+    input_file = Path(run_cfg["input_file"])
+    
+    stream_length = run_cfg.get("stream_length")
+    number_of_streams = run_cfg.get("number_of_streams")
+    
+    if stream_length is None or number_of_streams is None:
+        auto_len, auto_streams = _auto_calculate(input_file)
+        stream_length = stream_length or auto_len
+        number_of_streams = number_of_streams or auto_streams
+    
+    # Validate: make sure file has enough bits
+    file_size = input_file.stat().st_size
+    with open(input_file, "rb") as f:
+        sample = f.read(1000)
+    text = sample.decode("ascii", errors="ignore")
+    valid = set("01 \n\r\t")
+    is_ascii = all(c in valid for c in text) and len(text) > 100
+    total_bits = file_size if is_ascii else file_size * 8
+    needed = stream_length * number_of_streams
+    
+    if needed > total_bits:
+        # Auto-adjust down
+        number_of_streams = max(1, total_bits // stream_length)
+        print(f"  Warning: adjusted streams from {run_cfg.get('number_of_streams', 'auto')} to {number_of_streams} (file has {total_bits:,} bits, need {needed:,})")
+    
+    tests = {}
+    test_overrides = run_cfg.get("tests", {})
+    default_tests = [
+        "frequency", "block_frequency", "cumulative_sums", "runs",
+        "longest_run", "rank", "fft", "non_overlapping_template",
+        "overlapping_template", "universal", "approximate_entropy",
+        "random_excursions", "random_excursions_variant", "serial",
+        "linear_complexity"
+    ]
+    for test_name in default_tests:
+        override = test_overrides.get(test_name, {})
+        tests[test_name] = TestConfig(
+            enabled=override.get("enabled", True),
+            parameters={k: v for k, v in override.items() if k != "enabled"}
+        )
+    
+    return STSConfig(
+        sts_path=sts_path,
+        input_file=input_file,
+        generator=run_cfg["name"],
+        stream_length=stream_length,
+        number_of_streams=number_of_streams,
+        tests=tests
+    )
+
+
+def _execute_run(config: STSConfig) -> dict:
+    """Execute a single NIST STS run."""
+    runner = NISTRunner(config)
+    exp_dir = runner.run()
+    
+    parser = ResultParser(exp_dir, generator=config.generator)
+    summary = parser.parse()
+    
+    export_json(summary)
+    export_csv(summary)
+    export_latex(summary)
+    export_html(summary)
+    
+    return {
+        "generator": summary.generator,
+        "overall_status": summary.overall_status,
+        "experiment_directory": str(summary.experiment_directory),
+        "tests": [
+            {
+                "name": t.name,
+                "status": t.status,
+                "passed": t.passed,
+                "total": t.total,
+                "p_value": t.p_value,
+                "proportion": t.proportion
+            }
+            for t in summary.tests
+        ]
+    }
+
+
+def run_single(config_path: str):
+    """Run a single test from a config file."""
+    config = STSConfig.from_json(config_path)
+    result = _execute_run(config)
+    
+    print(f"\nOverall: {result['overall_status'].upper()}")
+    print(f"Tests: {len(result['tests'])}")
+    for t in result["tests"]:
+        icon = "[OK]" if t["status"] == "pass" else "[XX]" if t["status"] == "fail" else "[--]"
+        print(f"  {icon} {t['name']:30s} {t['passed']}/{t['total']}")
+    print(f"\nDashboard: {result['experiment_directory']}/dashboard.html")
+
+
+def run_quick(file_path: str, name: str, streams: int = None, length: int = None):
+    """Quick run: just point at a file and go."""
+    input_file = Path(file_path)
+    
+    stream_length = length
+    number_of_streams = streams
+    if stream_length is None or number_of_streams is None:
+        auto_len, auto_streams = _auto_calculate(input_file)
+        stream_length = stream_length or auto_len
+        number_of_streams = number_of_streams or auto_streams
+    
+    tests = {}
+    default_tests = [
+        "frequency", "block_frequency", "cumulative_sums", "runs",
+        "longest_run", "rank", "fft", "non_overlapping_template",
+        "overlapping_template", "universal", "approximate_entropy",
+        "random_excursions", "random_excursions_variant", "serial",
+        "linear_complexity"
+    ]
+    for test_name in default_tests:
+        tests[test_name] = TestConfig(enabled=True, parameters={})
+    
+    config = STSConfig(
+        sts_path=Path("sts/sts-2.1.2"),
+        input_file=input_file,
+        generator=name,
+        stream_length=stream_length,
+        number_of_streams=number_of_streams,
+        tests=tests
+    )
+    result = _execute_run(config)
+    
+    print(f"\nOverall: {result['overall_status'].upper()}")
+    print(f"Tests: {len(result['tests'])}")
+    for t in result["tests"]:
+        icon = "[OK]" if t["status"] == "pass" else "[XX]" if t["status"] == "fail" else "[--]"
+        print(f"  {icon} {t['name']:30s} {t['passed']}/{t['total']}")
+    print(f"\nDashboard: {result['experiment_directory']}/dashboard.html")
+
+
+def run_batch(batch_path: str):
+    """Run multiple configs sequentially and generate comparison report."""
+    with open(batch_path) as f:
+        batch = json.load(f)
+    
+    sts_path = Path(batch.get("sts_path", "sts/sts-2.1.2"))
+    
+    print(f"Batch mode: {len(batch['runs'])} runs (sequential)")
+    print("=" * 60)
+    
+    results = []
+    for i, run_cfg in enumerate(batch["runs"], 1):
+        print(f"\n[{i}/{len(batch['runs'])}] Running: {run_cfg['name']}")
+        config = _build_config_from_inline(sts_path, run_cfg)
+        result = _execute_run(config)
+        results.append(result)
+        print(f"  Done: {result['overall_status'].upper()}")
+    
+    # Build summaries for reporter
+    from src.parser.result_parser import ExperimentSummary, TestResult
+    summaries = []
+    for r in results:
+        summary = ExperimentSummary(
+            generator=r["generator"],
+            experiment_directory=Path(r["experiment_directory"]),
+            overall_status=r["overall_status"],
+            tests=[TestResult(**t) for t in r["tests"]]
+        )
+        summaries.append(summary)
+    
+    reporter = BatchReporter(summaries)
+    batch_dir = Path("batch_results") / f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    
+    reporter.generate_md(batch_dir / "comparison.md")
+    reporter.generate_json(batch_dir / "comparison.json")
+    reporter.generate_html(batch_dir / "comparison.html")
+    
+    print(f"\n{'='*60}")
+    print(f"Comparison report: {batch_dir}")
+    print(f"  comparison.md   → Markdown table")
+    print(f"  comparison.json → Structured data")
+    print(f"  comparison.html → Interactive dashboard")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NIST STS Test Runner")
+    parser.add_argument("--config", default="config.json", help="Single test config JSON")
+    parser.add_argument("--batch", help="Batch comparison config JSON")
+    parser.add_argument("--file", help="Quick test: input file path")
+    parser.add_argument("--name", help="Quick test: generator name")
+    parser.add_argument("--streams", type=int, help="Quick test: number of streams")
+    parser.add_argument("--length", type=int, help="Quick test: stream length")
+    args = parser.parse_args()
+    
+    if args.batch:
+        run_batch(args.batch)
+    elif args.file:
+        if not args.name:
+            args.name = Path(args.file).stem
+        run_quick(args.file, args.name, args.streams, args.length)
+    else:
+        run_single(args.config)
+
+
+if __name__ == "__main__":
+    main()

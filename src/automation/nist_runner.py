@@ -5,7 +5,6 @@ from datetime import datetime
 
 
 class NISTRunner:
-    # NIST defaults for each parameter-adjustable test
     DEFAULTS = {
         "block_frequency": {"block_length": 128},
         "non_overlapping_template": {"block_length": 9},
@@ -15,23 +14,12 @@ class NISTRunner:
         "linear_complexity": {"block_length": 500},
     }
 
-    # Test order for the 15 NIST tests (1-15)
     TEST_ORDER = [
-        "frequency",           # 1
-        "block_frequency",     # 2
-        "cumulative_sums",     # 3
-        "runs",                # 4
-        "longest_run",         # 5
-        "rank",                # 6
-        "fft",                 # 7
-        "non_overlapping_template",  # 8
-        "overlapping_template",      # 9
-        "universal",           # 10
-        "approximate_entropy", # 11
-        "random_excursions",   # 12
-        "random_excursions_variant", # 13
-        "serial",              # 14
-        "linear_complexity",   # 15
+        "frequency", "block_frequency", "cumulative_sums", "runs",
+        "longest_run", "rank", "fft", "non_overlapping_template",
+        "overlapping_template", "universal", "approximate_entropy",
+        "random_excursions", "random_excursions_variant", "serial",
+        "linear_complexity",
     ]
 
     def __init__(self, config):
@@ -65,7 +53,6 @@ class NISTRunner:
         return test_cfg.parameters.get(param_name, default)
 
     def _has_custom_params(self) -> bool:
-        """Check if any test parameter differs from NIST default."""
         for test_name, defaults in self.DEFAULTS.items():
             for param_name, default_val in defaults.items():
                 actual = self._get_param(test_name, param_name, default_val)
@@ -74,60 +61,47 @@ class NISTRunner:
         return False
 
     def _build_input_all_tests(self, mode: int) -> str:
-        """Path A: Run all tests with default parameters."""
         lines = [
-            "0",                           # Input File
-            self._relative_input(),        # file path
-            "1",                           # run ALL tests
-            "0",                           # continue (accept defaults)
+            "0",
+            self._relative_input(),
+            "1",
+            "0",
             str(self.config.number_of_streams),
             str(mode),
         ]
         return "\n".join(lines) + "\n"
 
     def _build_input_custom(self, mode: int) -> str:
-        """Path B: Custom test selection with adjustable parameters."""
         lines = [
-            "0",                           # Input File
-            self._relative_input(),        # file path
-            "0",                           # custom test selection
+            "0",
+            self._relative_input(),
+            "0",
         ]
 
-        # Enable/disable each of the 15 tests
         for test_name in self.TEST_ORDER:
             test_cfg = self.config.tests.get(test_name)
-            if test_cfg is not None and hasattr(test_cfg, "enabled"):
-                enabled = test_cfg.enabled
-            else:
-                enabled = True
+            enabled = test_cfg.enabled if test_cfg is not None and hasattr(test_cfg, "enabled") else True
             lines.append("1" if enabled else "0")
 
-        # Parameter adjustments
-        # [1] Block Frequency
         block_len = self._get_param("block_frequency", "block_length", 128)
         lines.extend(["1", str(block_len)])
 
-        # [2] NonOverlapping Template
         non_overlap_len = self._get_param("non_overlapping_template", "block_length", 9)
         lines.extend(["2", str(non_overlap_len)])
 
-        # [3] Overlapping Template
         overlap_len = self._get_param("overlapping_template", "block_length", 9)
         lines.extend(["3", str(overlap_len)])
 
-        # [4] Approximate Entropy
         approx_len = self._get_param("approximate_entropy", "block_length", 10)
         lines.extend(["4", str(approx_len)])
 
-        # [5] Serial
         serial_len = self._get_param("serial", "block_length", 16)
         lines.extend(["5", str(serial_len)])
 
-        # [6] Linear Complexity
         linear_len = self._get_param("linear_complexity", "block_length", 500)
         lines.extend(["6", str(linear_len)])
 
-        lines.append("0")  # done adjusting
+        lines.append("0")
         lines.append(str(self.config.number_of_streams))
         lines.append(str(mode))
 
@@ -151,9 +125,10 @@ class NISTRunner:
         ]
         for name in test_names:
             (algo_dir / name).mkdir(exist_ok=True)
-            for f in (algo_dir / name).iterdir():
-                if f.is_file():
-                    f.unlink()
+
+        placeholder = algo_dir / "create-dir-script"
+        if not placeholder.exists():
+            placeholder.touch()
 
     def _clean_old_results(self):
         sts_dir = self.sts_dir
@@ -161,6 +136,16 @@ class NISTRunner:
             p = sts_dir / name
             if p.exists():
                 p.unlink()
+
+        algo_dir = sts_dir / "experiments" / "AlgorithmTesting"
+        if algo_dir.exists():
+            for item in algo_dir.iterdir():
+                if item.is_dir():
+                    for f in item.iterdir():
+                        if f.is_file():
+                            f.unlink()
+                elif item.is_file() and item.name != "create-dir-script":
+                    item.unlink()
 
     def _copy_results(self, dest: Path):
         sts_dir = self.sts_dir
@@ -172,7 +157,7 @@ class NISTRunner:
         algo_dir = sts_dir / "experiments" / "AlgorithmTesting"
         if algo_dir.exists():
             for item in algo_dir.iterdir():
-                if item.is_file():
+                if item.is_file() and item.name != "create-dir-script":
                     shutil.copy2(item, dest / item.name)
                 elif item.is_dir():
                     dst = dest / item.name
@@ -183,7 +168,9 @@ class NISTRunner:
     def run(self) -> Path:
         mode = self._detect_mode(self.config.input_file)
 
-        self.exp_dir = Path("experiments") / f"{self.config.generator}_{self.config.stream_length}_{self.config.number_of_streams}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Folder naming: use input file stem + timestamp
+        input_name = self.config.input_file.stem
+        self.exp_dir = Path("experiments") / f"{input_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.exp_dir.mkdir(parents=True, exist_ok=True)
 
         self._setup_directories()
@@ -191,6 +178,12 @@ class NISTRunner:
 
         cmd = ["./assess", str(self.config.stream_length)]
         inp = self._build_input(mode)
+
+        # DEBUG: print exactly what we send
+        print("========== INPUT TO ASSESS ==========")
+        for i, line in enumerate(inp.strip().split("\n"), 1):
+            print(f"  {i}: {repr(line)}")
+        print("=====================================")
 
         result = subprocess.run(
             cmd,
@@ -201,9 +194,19 @@ class NISTRunner:
             timeout=600
         )
 
+        print(f"Return code: {result.returncode}")
+        print(f"STDOUT tail:\n{result.stdout[-800:]}")
+        print(f"STDERR:\n{result.stderr[-500:]}")
+
         self._copy_results(self.exp_dir)
 
-        report = self.sts_dir / "experiments" / "AlgorithmTesting" / "finalAnalysisReport.txt"
+        # Check both possible report locations
+        report1 = self.sts_dir / "experiments" / "AlgorithmTesting" / "finalAnalysisReport.txt"
+        report2 = self.sts_dir / "finalAnalysisReport.txt"
+
+        report = report1 if report1.exists() else report2
+        print(f"Report check: {report} exists={report.exists()} size={report.stat().st_size if report.exists() else 0}")
+
         if not report.exists() or report.stat().st_size < 100:
             raise RuntimeError(f"assess failed. stdout: {result.stdout[-500:]}")
 
