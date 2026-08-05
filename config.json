@@ -1,6 +1,6 @@
 {
   "sts_path": "sts/sts-2.1.2",
-  "input_file": "sts/sts-2.1.2/data/data.pi",
+  "input_file": "/workspaces/fs/takum_log16_coupled_lfsr 1.bin",
   "generator": "Pi",
   "stream_length": 100000,
   "number_of_streams": 10,
