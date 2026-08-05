@@ -168,7 +168,6 @@ class NISTRunner:
     def run(self) -> Path:
         mode = self._detect_mode(self.config.input_file)
 
-        # Folder naming: use input file stem + timestamp
         input_name = self.config.input_file.stem
         self.exp_dir = Path("experiments") / f"{input_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.exp_dir.mkdir(parents=True, exist_ok=True)
@@ -179,12 +178,6 @@ class NISTRunner:
         cmd = ["./assess", str(self.config.stream_length)]
         inp = self._build_input(mode)
 
-        # DEBUG: print exactly what we send
-        print("========== INPUT TO ASSESS ==========")
-        for i, line in enumerate(inp.strip().split("\n"), 1):
-            print(f"  {i}: {repr(line)}")
-        print("=====================================")
-
         result = subprocess.run(
             cmd,
             input=inp,
@@ -194,19 +187,9 @@ class NISTRunner:
             timeout=600
         )
 
-        print(f"Return code: {result.returncode}")
-        print(f"STDOUT tail:\n{result.stdout[-800:]}")
-        print(f"STDERR:\n{result.stderr[-500:]}")
-
         self._copy_results(self.exp_dir)
 
-        # Check both possible report locations
-        report1 = self.sts_dir / "experiments" / "AlgorithmTesting" / "finalAnalysisReport.txt"
-        report2 = self.sts_dir / "finalAnalysisReport.txt"
-
-        report = report1 if report1.exists() else report2
-        print(f"Report check: {report} exists={report.exists()} size={report.stat().st_size if report.exists() else 0}")
-
+        report = self.sts_dir / "experiments" / "AlgorithmTesting" / "finalAnalysisReport.txt"
         if not report.exists() or report.stat().st_size < 100:
             raise RuntimeError(f"assess failed. stdout: {result.stdout[-500:]}")
 

@@ -1,5 +1,9 @@
 import argparse
 import json
+import multiprocessing
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -8,13 +12,12 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.config.sts_config import STSConfig, TestConfig
 from src.automation.nist_runner import NISTRunner
-from src.parser.result_parser import ResultParser
+from src.parser.result_parser import ResultParser, ExperimentSummary, TestResult
 from src.exporters import export_json, export_csv, export_latex, export_html
 from src.core.batch_reporter import BatchReporter
 
 
 def _auto_calculate(file_path: Path) -> tuple:
-    """Auto-calculate stream_length and number_of_streams."""
     file_size = file_path.stat().st_size
     with open(file_path, "rb") as f:
         sample = f.read(1000)
@@ -23,7 +26,6 @@ def _auto_calculate(file_path: Path) -> tuple:
     is_ascii = all(c in valid for c in text) and len(text) > 100
     total_bits = file_size if is_ascii else file_size * 8
     
-    # Conservative defaults
     stream_length = 100000
     number_of_streams = min(total_bits // stream_length, 10)
     
@@ -35,7 +37,6 @@ def _auto_calculate(file_path: Path) -> tuple:
 
 
 def _build_config_from_inline(sts_path: Path, run_cfg: dict) -> STSConfig:
-    """Build STSConfig from inline batch.json entry."""
     input_file = Path(run_cfg["input_file"])
     
     stream_length = run_cfg.get("stream_length")
@@ -46,7 +47,6 @@ def _build_config_from_inline(sts_path: Path, run_cfg: dict) -> STSConfig:
         stream_length = stream_length or auto_len
         number_of_streams = number_of_streams or auto_streams
     
-    # Validate: make sure file has enough bits
     file_size = input_file.stat().st_size
     with open(input_file, "rb") as f:
         sample = f.read(1000)
@@ -57,9 +57,8 @@ def _build_config_from_inline(sts_path: Path, run_cfg: dict) -> STSConfig:
     needed = stream_length * number_of_streams
     
     if needed > total_bits:
-        # Auto-adjust down
         number_of_streams = max(1, total_bits // stream_length)
-        print(f"  Warning: adjusted streams from {run_cfg.get('number_of_streams', 'auto')} to {number_of_streams} (file has {total_bits:,} bits, need {needed:,})")
+        print(f"  Warning: adjusted streams to {number_of_streams} (file has {total_bits:,} bits)")
     
     tests = {}
     test_overrides = run_cfg.get("tests", {})
@@ -87,41 +86,89 @@ def _build_config_from_inline(sts_path: Path, run_cfg: dict) -> STSConfig:
     )
 
 
-def _execute_run(config: STSConfig) -> dict:
-    """Execute a single NIST STS run."""
-    runner = NISTRunner(config)
-    exp_dir = runner.run()
+def _run_worker(config_dict: dict) -> dict:
+    """Run one test in an isolated temp directory for true parallelism."""
+    original_sts_path = Path(config_dict["sts_path"]).resolve()
+    input_file = Path(config_dict["input_file"]).resolve()
+    project_root = Path(config_dict["project_root"]).resolve()
     
-    parser = ResultParser(exp_dir, generator=config.generator)
-    summary = parser.parse()
+    os.chdir(project_root)
+    temp_dir = Path(tempfile.mkdtemp(prefix="sts_worker_"))
     
-    export_json(summary)
-    export_csv(summary)
-    export_latex(summary)
-    export_html(summary)
-    
-    return {
-        "generator": summary.generator,
-        "overall_status": summary.overall_status,
-        "experiment_directory": str(summary.experiment_directory),
-        "tests": [
-            {
-                "name": t.name,
-                "status": t.status,
-                "passed": t.passed,
-                "total": t.total,
-                "p_value": t.p_value,
-                "proportion": t.proportion
-            }
-            for t in summary.tests
-        ]
-    }
+    try:
+        # Copy entire STS tree to temp dir
+        temp_sts = temp_dir / "sts"
+        shutil.copytree(original_sts_path, temp_sts)
+        
+        # Copy input file into temp STS dir preserving relative path
+        try:
+            rel_path = input_file.relative_to(original_sts_path)
+            dest = temp_sts / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(input_file, dest)
+            input_file = dest
+        except ValueError:
+            dest = temp_sts / input_file.name
+            shutil.copy2(input_file, dest)
+            input_file = dest
+        
+        # Rebuild config pointing at temp dir and copied file
+        tests = {}
+        for k, v in config_dict["tests"].items():
+            tests[k] = TestConfig(enabled=v["enabled"], parameters=v.get("parameters", {}))
+        
+        config = STSConfig(
+            sts_path=temp_sts,
+            input_file=input_file,
+            generator=config_dict["generator"],
+            stream_length=config_dict["stream_length"],
+            number_of_streams=config_dict["number_of_streams"],
+            tests=tests
+        )
+        
+        runner = NISTRunner(config)
+        exp_dir = runner.run()
+        
+        parser = ResultParser(exp_dir, generator=config.generator)
+        summary = parser.parse()
+        
+        export_json(summary)
+        export_csv(summary)
+        export_latex(summary)
+        export_html(summary)
+        
+        return {
+            "generator": summary.generator,
+            "overall_status": summary.overall_status,
+            "experiment_directory": str(exp_dir),
+            "tests": [
+                {
+                    "name": t.name,
+                    "status": t.status,
+                    "passed": t.passed,
+                    "total": t.total,
+                    "p_value": t.p_value,
+                    "proportion": t.proportion
+                }
+                for t in summary.tests
+            ]
+        }
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def run_single(config_path: str):
-    """Run a single test from a config file."""
     config = STSConfig.from_json(config_path)
-    result = _execute_run(config)
+    config_dict = {
+        "sts_path": str(config.sts_path),
+        "input_file": str(config.input_file),
+        "generator": config.generator,
+        "stream_length": config.stream_length,
+        "number_of_streams": config.number_of_streams,
+        "tests": {k: {"enabled": v.enabled, "parameters": v.parameters} for k, v in config.tests.items()},
+        "project_root": str(Path.cwd())
+    }
+    result = _run_worker(config_dict)
     
     print(f"\nOverall: {result['overall_status'].upper()}")
     print(f"Tests: {len(result['tests'])}")
@@ -132,7 +179,6 @@ def run_single(config_path: str):
 
 
 def run_quick(file_path: str, name: str, streams: int = None, length: int = None):
-    """Quick run: just point at a file and go."""
     input_file = Path(file_path)
     
     stream_length = length
@@ -142,7 +188,6 @@ def run_quick(file_path: str, name: str, streams: int = None, length: int = None
         stream_length = stream_length or auto_len
         number_of_streams = number_of_streams or auto_streams
     
-    tests = {}
     default_tests = [
         "frequency", "block_frequency", "cumulative_sums", "runs",
         "longest_run", "rank", "fft", "non_overlapping_template",
@@ -150,18 +195,17 @@ def run_quick(file_path: str, name: str, streams: int = None, length: int = None
         "random_excursions", "random_excursions_variant", "serial",
         "linear_complexity"
     ]
-    for test_name in default_tests:
-        tests[test_name] = TestConfig(enabled=True, parameters={})
     
-    config = STSConfig(
-        sts_path=Path("sts/sts-2.1.2"),
-        input_file=input_file,
-        generator=name,
-        stream_length=stream_length,
-        number_of_streams=number_of_streams,
-        tests=tests
-    )
-    result = _execute_run(config)
+    config_dict = {
+        "sts_path": "sts/sts-2.1.2",
+        "input_file": str(input_file),
+        "generator": name,
+        "stream_length": stream_length,
+        "number_of_streams": number_of_streams,
+        "tests": {k: {"enabled": True, "parameters": {}} for k in default_tests},
+        "project_root": str(Path.cwd())
+    }
+    result = _run_worker(config_dict)
     
     print(f"\nOverall: {result['overall_status'].upper()}")
     print(f"Tests: {len(result['tests'])}")
@@ -172,25 +216,35 @@ def run_quick(file_path: str, name: str, streams: int = None, length: int = None
 
 
 def run_batch(batch_path: str):
-    """Run multiple configs sequentially and generate comparison report."""
     with open(batch_path) as f:
         batch = json.load(f)
     
     sts_path = Path(batch.get("sts_path", "sts/sts-2.1.2"))
+    project_root = str(Path.cwd())
     
-    print(f"Batch mode: {len(batch['runs'])} runs (sequential)")
+    config_dicts = []
+    for run_cfg in batch["runs"]:
+        config = _build_config_from_inline(sts_path, run_cfg)
+        config_dicts.append({
+            "sts_path": str(config.sts_path),
+            "input_file": str(config.input_file),
+            "generator": config.generator,
+            "stream_length": config.stream_length,
+            "number_of_streams": config.number_of_streams,
+            "tests": {k: {"enabled": v.enabled, "parameters": v.parameters} for k, v in config.tests.items()},
+            "project_root": project_root
+        })
+    
+    num_workers = min(len(config_dicts), multiprocessing.cpu_count())
+    print(f"Batch mode: {len(config_dicts)} runs")
+    print(f"Running in parallel on {num_workers} CPU cores...")
     print("=" * 60)
     
-    results = []
-    for i, run_cfg in enumerate(batch["runs"], 1):
-        print(f"\n[{i}/{len(batch['runs'])}] Running: {run_cfg['name']}")
-        config = _build_config_from_inline(sts_path, run_cfg)
-        result = _execute_run(config)
-        results.append(result)
-        print(f"  Done: {result['overall_status'].upper()}")
+    with multiprocessing.Pool(processes=num_workers) as pool:
+        results = pool.map(_run_worker, config_dicts)
     
-    # Build summaries for reporter
-    from src.parser.result_parser import ExperimentSummary, TestResult
+    print("\nAll runs complete!")
+    
     summaries = []
     for r in results:
         summary = ExperimentSummary(
