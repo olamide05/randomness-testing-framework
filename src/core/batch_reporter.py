@@ -1,3 +1,4 @@
+import html
 import json
 from pathlib import Path
 from typing import List
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 @dataclass
 class BatchReporter:
     summaries: List
-    
+
     def _collect_tests(self) -> List[str]:
         """Get all unique test names across all runs."""
         tests = set()
@@ -15,29 +16,29 @@ class BatchReporter:
             for t in s.tests:
                 tests.add(t.name)
         return sorted(tests)
-    
+
     def _get_test_result(self, summary, test_name: str):
         """Get a specific test result from a summary."""
         for t in summary.tests:
             if t.name == test_name:
                 return t
         return None
-    
+
     def generate_md(self, output_path: Path):
         """Generate Markdown comparison table."""
         tests = self._collect_tests()
-        
+
         lines = [
             "# NIST STS Batch Comparison",
             "",
             "| Generator | Overall | " + " | ".join(t.replace("_", " ").title() for t in tests) + " |",
             "|" + "-" * 10 + "|" + "-" * 8 + "|" + "|".join("-" * 12 for _ in tests) + "|",
         ]
-        
+
         for summary in self.summaries:
             overall = "PASS" if summary.overall_status == "pass" else "FAIL" if summary.overall_status == "fail" else "N/A"
             row = f"| {summary.generator:8s} | {overall:6s} |"
-            
+
             for test_name in tests:
                 t = self._get_test_result(summary, test_name)
                 if t and t.total > 0:
@@ -47,12 +48,12 @@ class BatchReporter:
                 else:
                     status = "N/A"
                 row += f" {status:10s} |"
-            
+
             lines.append(row)
-        
+
         with open(output_path, "w") as f:
             f.write("\n".join(lines) + "\n")
-    
+
     def generate_json(self, output_path: Path):
         """Generate JSON comparison."""
         data = []
@@ -73,78 +74,111 @@ class BatchReporter:
                     for t in summary.tests
                 ]
             })
-        
+
         with open(output_path, "w") as f:
             json.dump(data, f, indent=2)
-    
+
     def generate_html(self, output_path: Path):
-        """Generate interactive HTML comparison dashboard."""
+        """Generate an HTML comparison dashboard across all runs in the batch."""
         tests = self._collect_tests()
-        
-        header_cols = "<th>Generator</th><th>Overall</th>"
-        for test_name in tests:
-            header_cols += f"<th>{test_name.replace('_', ' ').title()}</th>"
-        
-        rows = ""
+
+        header_cols = "".join(
+            f'<th>{html.escape(t.replace("_", " ").title())}</th>'
+            for t in tests
+        )
+
+        rows = []
         for summary in self.summaries:
-            overall_class = "pass" if summary.overall_status == "pass" else "fail" if summary.overall_status == "fail" else "skip"
-            overall_text = summary.overall_status.upper()
-            
-            row = f'<tr><td class="gen">{summary.generator}</td>'
-            row += f'<td class="{overall_class}">{overall_text}</td>'
-            
+            overall = summary.overall_status
+            overall_label = {"pass": "PASS", "fail": "FAIL"}.get(overall, "N/A")
+
+            cells = ""
             for test_name in tests:
                 t = self._get_test_result(summary, test_name)
                 if t and t.total > 0:
-                    cell_class = "pass" if t.status == "pass" else "fail"
-                    cell_text = f"{t.passed}/{t.total}"
+                    cls = "pass" if t.status == "pass" else "fail"
+                    text = f"{t.passed}/{t.total}"
                 elif t:
-                    cell_class = "skip"
-                    cell_text = "SKIP"
+                    cls, text = "skip", "SKIP"
                 else:
-                    cell_class = "skip"
-                    cell_text = "N/A"
-                
-                row += f'<td class="{cell_class}">{cell_text}</td>'
-            
-            row += "</tr>\n"
-            rows += row
-        
-        html = f"""<!DOCTYPE html>
-<html>
+                    cls, text = "skip", "\u2014"
+                cells += f'<td class="{cls}"><span class="dot"></span>{text}</td>'
+
+            rows.append(
+                f'<tr><td class="gen">{html.escape(str(summary.generator))}</td>'
+                f'<td class="overall {overall}">{overall_label}</td>{cells}</tr>'
+            )
+
+        passed_n = sum(1 for s in self.summaries if s.overall_status == "pass")
+
+        html_doc = f"""<!DOCTYPE html>
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>NIST STS Batch Comparison</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STS Batch Comparison</title>
 <style>
-:root {{ --pass: #22c55e; --fail: #ef4444; --skip: #9ca3af; --bg: #f5f5f5; }}
-body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 1400px; margin: 40px auto; padding: 20px; background: var(--bg); }}
-h1 {{ margin: 0 0 24px 0; font-size: 28px; }}
-.card {{ background: white; border-radius: 12px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); overflow-x: auto; }}
-table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
-th {{ background: #1f2937; color: white; padding: 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }}
-td {{ padding: 10px 12px; border-bottom: 1px solid #e5e7eb; }}
-tr:hover td {{ background: #f9fafb; }}
-.gen {{ font-weight: 600; color: #1f2937; }}
-.pass {{ background: #dcfce7; color: #166534; font-weight: 600; }}
-.fail {{ background: #fee2e2; color: #991b1b; font-weight: 600; }}
-.skip {{ background: #f3f4f6; color: #6b7280; }}
-td.pass, td.fail, td.skip {{ text-align: center; border-radius: 4px; }}
+  :root {{
+    --paper: #F6F7F5; --ink: #161D1A; --ink-soft: #4B564F; --line: #DCE1DC;
+    --pass: #1F6E4A; --pass-bg: #E7F2EC; --fail: #A6362B; --fail-bg: #F3E5E2;
+    --skip: #8B948E; --skip-bg: #EEF0EE;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    padding: 32px 16px 64px;
+  }}
+  .report {{ max-width: 1100px; margin: 0 auto; }}
+  .eyebrow {{
+    font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-soft); margin: 0 0 6px;
+  }}
+  h1 {{ font-size: 26px; margin: 0 0 6px; font-weight: 700; letter-spacing: -0.01em; }}
+  .meta {{
+    color: var(--ink-soft); font-size: 12px; border-bottom: 2px solid var(--ink);
+    padding-bottom: 20px; margin-bottom: 20px;
+  }}
+  .meta b {{ color: var(--ink); }}
+  .table-wrap {{ overflow-x: auto; border: 1px solid var(--line); }}
+  table {{ border-collapse: collapse; width: 100%; font-size: 12px; table-layout: fixed; }}
+  th, td {{ padding: 9px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }}
+  th {{ width: 92px; text-align: right; font-weight: 600; color: var(--ink-soft); background: var(--paper);
+       white-space: normal; line-height: 1.3; vertical-align: bottom;
+       position: sticky; top: 0; border-bottom: 2px solid var(--ink); }}
+  th:first-child, td:first-child {{ width: 130px; text-align: left; position: sticky; left: 0; background: var(--paper); }}
+  th:nth-child(2), td:nth-child(2) {{ width: 70px; }}
+  .gen {{ font-weight: 700; }}
+  .overall {{ font-weight: 700; letter-spacing: 0.04em; }}
+  .overall.pass {{ color: var(--pass); }}
+  .overall.fail {{ color: var(--fail); }}
+  td.pass, td.fail, td.skip {{ font-variant-numeric: tabular-nums; }}
+  .dot {{ display: inline-block; width: 7px; height: 7px; margin-right: 6px; vertical-align: middle; }}
+  .pass .dot {{ background: var(--pass); }}
+  .fail .dot {{ background: var(--fail); }}
+  .skip .dot {{ background: var(--skip); }}
+  tr:hover td {{ background: #EEF1EE; }}
+  tr:hover td:first-child {{ background: #EEF1EE; }}
+  footer {{ margin-top: 20px; font-size: 11px; color: var(--ink-soft); }}
 </style>
 </head>
 <body>
-<div class="card">
-<h1>NIST STS Batch Comparison</h1>
-<table>
-<thead>
-<tr>{header_cols}</tr>
-</thead>
-<tbody>
-{rows}
-</tbody>
-</table>
+<div class="report">
+  <p class="eyebrow">NIST SP 800-22 &middot; Batch Comparison</p>
+  <h1>{len(self.summaries)} generators &middot; {len(tests)} tests</h1>
+  <p class="meta"><b>{passed_n}</b> / {len(self.summaries)} generators passed every evaluated test</p>
+  <div class="table-wrap">
+  <table>
+  <thead><tr><th>Generator</th><th>Overall</th>{header_cols}</tr></thead>
+  <tbody>
+  {"".join(rows)}
+  </tbody>
+  </table>
+  </div>
+  <footer>Generated by the randomness-testing-framework &middot; thresholds per NIST SP 800-22</footer>
 </div>
 </body>
 </html>"""
-        
+
         with open(output_path, "w") as f:
-            f.write(html)
+            f.write(html_doc)

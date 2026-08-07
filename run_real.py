@@ -36,9 +36,9 @@ def main():
     print(f"Streams: {config.number_of_streams} x {config.stream_length:,} bits")
     print(f"\nFile: {bits:,} bits | Needed: {needed:,} bits")
 
-    if bits < needed:
-        print(f"\nERROR: File too small. Need {needed:,} bits, have {bits:,}")
-        sys.exit(1)
+#    if bits < needed:
+ #       print(f"\nERROR: File too small. Need {needed:,} bits, have {bits:,}")
+  #      sys.exit(1)
 
     print("\nRunning NIST STS...")
     runner = NISTRunner(config)

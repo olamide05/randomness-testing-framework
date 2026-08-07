@@ -3,15 +3,15 @@
   "runs": [
     {
       "name": "Pi digits",
-      "input_file": "sts/sts-2.1.2/data/data.pi",
+      "input_file": "/workspaces/fs/takum_log16_coupled_lfsr_ascon.bin",
       "stream_length": 100000,
-      "number_of_streams": 10
+      "number_of_streams": 100
     },
     {
       "name": "e digits",
-      "input_file": "sts/sts-2.1.2/data/data.e",
+      "input_file": "/workspaces/fs/takum_log16_coupled_lfsr_1.bin",
       "stream_length": 100000,
-      "number_of_streams": 10
+      "number_of_streams": 100
     }
   ]
 }

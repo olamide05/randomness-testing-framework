@@ -1,4 +1,4 @@
-import re
+import math
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict
@@ -23,6 +23,24 @@ class ExperimentSummary:
 
 
 class ResultParser:
+    DETAIL_DIR_NAMES = {
+        "frequency": "Frequency",
+        "block_frequency": "BlockFrequency",
+        "cumulative_sums": "CumulativeSums",
+        "runs": "Runs",
+        "longest_run": "LongestRun",
+        "rank": "Rank",
+        "fft": "FFT",
+        "non_overlapping_template": "NonOverlappingTemplate",
+        "overlapping_template": "OverlappingTemplate",
+        "universal": "Universal",
+        "approximate_entropy": "ApproximateEntropy",
+        "random_excursions": "RandomExcursions",
+        "random_excursions_variant": "RandomExcursionsVariant",
+        "serial": "Serial",
+        "linear_complexity": "LinearComplexity",
+    }
+
     def __init__(self, experiment_directory: Path, generator: str = ""):
         self.experiment_directory = Path(experiment_directory)
         self.generator = generator
@@ -56,23 +74,14 @@ class ResultParser:
                 name, p_val, passed, total = parsed
 
                 if name not in report_data:
-                    report_data[name] = {
-                        "p_values": [],
-                        "passed": 0,
-                        "total": 0
-                    }
+                    report_data[name] = {"p_values": [], "passed": 0, "total": 0}
 
                 report_data[name]["p_values"].append(p_val)
                 report_data[name]["passed"] += passed
                 report_data[name]["total"] += total
 
         for name, data in report_data.items():
-            test = TestResult(
-                name=name,
-                passed=0,
-                total=0,
-                status="unknown"
-            )
+            test = TestResult(name=name, passed=0, total=0, status="unknown")
 
             detail_passed, detail_total = self._read_detail_file(name)
             if detail_total > 0:
@@ -84,7 +93,8 @@ class ResultParser:
 
             if test.total > 0:
                 test.proportion = test.passed / test.total
-                test.status = "pass" if test.proportion >= 0.96 else "fail"
+                low, high = self._acceptable_range(test.total)
+                test.status = "pass" if low <= test.passed <= high else "fail"
             else:
                 test.status = "skipped"
 
@@ -101,8 +111,17 @@ class ResultParser:
 
         return summary
 
+    @staticmethod
+    def _acceptable_range(sample_size: int) -> tuple:
+        if sample_size <= 0:
+            return 0, 0
+        alpha = 0.01
+        p_hat = 1.0 - alpha
+        delta = 3.0 * math.sqrt((p_hat * alpha) / sample_size)
+        return (p_hat - delta) * sample_size, (p_hat + delta) * sample_size
+
     def _parse_report_line(self, line: str) -> Optional[tuple]:
-        parts = line.strip().split()
+        parts = [p for p in line.strip().split() if p != "*"]
         if len(parts) < 3:
             return None
 
@@ -151,11 +170,9 @@ class ResultParser:
         return mapping.get(raw, raw)
 
     def _read_detail_file(self, name: str) -> tuple:
-        dir_name = name.replace("_", "").title()
-        if dir_name == "Cumulativesums":
-            dir_name = "CumulativeSums"
-        if dir_name == "Fft":
-            dir_name = "FFT"
+        dir_name = self.DETAIL_DIR_NAMES.get(name)
+        if dir_name is None:
+            return 0, 0
 
         test_dir = self.experiment_directory / dir_name
         if not test_dir.exists():

@@ -16,3 +16,4 @@ sts/sts-2.1.2/assess
 sts/sts-2.1.2/obj/*.o
 
 .vscode/
+experiments/

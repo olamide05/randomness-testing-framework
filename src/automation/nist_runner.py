@@ -38,13 +38,27 @@ class NISTRunner:
             return 0
         return 1
 
-    def _relative_input(self) -> str:
+    def _prepare_input_file(self) -> str:
+        """Return the path to hand to assess's stdin, guaranteeing it's
+        reachable from sts_dir (assess runs with cwd=sts_dir).
+
+        assess reads this value with an unbounded C `scanf("%s", file)`
+        into a fixed 200-byte buffer (sts-2.1.2/src/utilities.c), so this
+        deliberately returns a short sts_dir-relative name rather than a
+        long absolute path -- both to actually find the file (a bare
+        filename only resolves if it's already inside sts_dir) and to
+        stay well clear of that buffer.
+        """
         abs_input = self.config.input_file.resolve()
-        abs_sts = self.sts_dir.resolve()
+        abs_sts = self.sts_dir
+
         try:
             return str(abs_input.relative_to(abs_sts))
         except ValueError:
-            return str(abs_input.name)
+            dest = abs_sts / abs_input.name
+            if not dest.exists() or dest.stat().st_mtime < abs_input.stat().st_mtime:
+                shutil.copy2(abs_input, dest)
+            return dest.name
 
     def _get_param(self, test_name: str, param_name: str, default):
         test_cfg = self.config.tests.get(test_name)
@@ -60,10 +74,10 @@ class NISTRunner:
                     return True
         return False
 
-    def _build_input_all_tests(self, mode: int) -> str:
+    def _build_input_all_tests(self, mode: int, input_name: str) -> str:
         lines = [
             "0",
-            self._relative_input(),
+            input_name,
             "1",
             "0",
             str(self.config.number_of_streams),
@@ -71,10 +85,10 @@ class NISTRunner:
         ]
         return "\n".join(lines) + "\n"
 
-    def _build_input_custom(self, mode: int) -> str:
+    def _build_input_custom(self, mode: int, input_name: str) -> str:
         lines = [
             "0",
-            self._relative_input(),
+            input_name,
             "0",
         ]
 
@@ -107,10 +121,10 @@ class NISTRunner:
 
         return "\n".join(lines) + "\n"
 
-    def _build_input(self, mode: int) -> str:
+    def _build_input(self, mode: int, input_name: str) -> str:
         if self._has_custom_params():
-            return self._build_input_custom(mode)
-        return self._build_input_all_tests(mode)
+            return self._build_input_custom(mode, input_name)
+        return self._build_input_all_tests(mode, input_name)
 
     def _setup_directories(self):
         sts_dir = self.sts_dir
@@ -167,16 +181,17 @@ class NISTRunner:
 
     def run(self) -> Path:
         mode = self._detect_mode(self.config.input_file)
+        input_name = self._prepare_input_file()
 
-        input_name = self.config.input_file.stem
-        self.exp_dir = Path("experiments") / f"{input_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        exp_name = self.config.input_file.stem
+        self.exp_dir = Path("experiments") / f"{exp_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.exp_dir.mkdir(parents=True, exist_ok=True)
 
         self._setup_directories()
         self._clean_old_results()
 
         cmd = ["./assess", str(self.config.stream_length)]
-        inp = self._build_input(mode)
+        inp = self._build_input(mode, input_name)
 
         result = subprocess.run(
             cmd,
